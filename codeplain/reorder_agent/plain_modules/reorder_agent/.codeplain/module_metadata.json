@@ -1,0 +1,12 @@
+{
+    "source_hash": "83660ba0a082e0c6845cf0425708a6f58a37eb39c99e09645fe184800f193a5f",
+    "non_functional_source_hash": "2c0c1b35028fa3b0990fbd8dc22b34f575560be36c432461a31f96a72404554e",
+    "functionalities": [
+        "- :App: should read :StockReport: from the JSON file at the path given in its command-line argument.",
+        "- :App: should generate a :ReorderAction: with Urgency \"high\" for every :StockItem: in :StockReport: whose Status is \"critical\".",
+        "- :App: should generate a :ReorderAction: with Urgency \"medium\" for every :StockItem: in :StockReport: whose Status is \"low\".",
+        "- :App: should not generate a :ReorderAction: for any :StockItem: whose Status is \"ok\".",
+        "- :App: should set Suggested Order on every generated :ReorderAction: to a non-empty, human-readable restock suggestion that references the item's name.",
+        "- :App: should print the complete :ReorderPlan: as a JSON array to stdout and exit with status code 0 after a successful run."
+    ]
+}

@@ -1,0 +1,748 @@
+/**
+ * Sally AI Camera Firmware
+ * For DFRobot DFR1154 ESP32-S3 AI Camera (OV3660)
+ *
+ * Features:
+ * - HTTP MJPEG video streaming (WiFi, port 81)
+ * - Single image capture endpoint (port 80)
+ * - BLE configuration and control
+ * - NVS storage for WiFi credentials
+ * - Auto-upload snapshots to cloud backend
+ * - Night vision IR LED control
+ * - Audio I2S speaker output
+ */
+
+#include "esp_camera.h"
+#include "esp_http_server.h"
+#include "img_converters.h"
+#include "Audio.h"
+#include <Arduino.h>
+#include <FS.h>
+#include <HTTPClient.h>
+#include <LittleFS.h>
+#include <WiFi.h>
+#include <base64.h>
+#include <Preferences.h>
+#include <NimBLEDevice.h>
+
+// ==========================================
+// CONFIGURATION
+// ==========================================
+
+// Default WiFi (fallback if no credentials stored)
+const char *DEFAULT_WIFI_SSID = "HeySalad_02";
+const char *DEFAULT_WIFI_PASS = "GutenTag%800";
+
+// API Configuration
+const char *API_HOST = "https://sally-camera-backend.heysalad-o.workers.dev";
+
+// BLE Configuration
+#define SERVICE_UUID              "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define STATUS_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+
+// ==========================================
+// DFRobot DFR1154 GPIO PINS
+// ==========================================
+
+// Camera pins (OV3660)
+#define PWDN_GPIO_NUM   -1
+#define RESET_GPIO_NUM  -1
+#define XCLK_GPIO_NUM    5
+#define SIOD_GPIO_NUM    8   // SCCB SDA
+#define SIOC_GPIO_NUM    9   // SCCB SCL
+#define Y9_GPIO_NUM      4
+#define Y8_GPIO_NUM      6
+#define Y7_GPIO_NUM      7
+#define Y6_GPIO_NUM     14
+#define Y5_GPIO_NUM     17
+#define Y4_GPIO_NUM     21
+#define Y3_GPIO_NUM     18
+#define Y2_GPIO_NUM     16
+#define VSYNC_GPIO_NUM   1
+#define HREF_GPIO_NUM    2
+#define PCLK_GPIO_NUM   15
+
+// Onboard peripherals
+#define LED_PIN         3   // Status LED
+#define IR_LED_PIN     47   // Infrared illumination
+#define BUTTON_PIN      0   // BOOT button
+
+// I2S Speaker pins (MAX98357A compatible)
+#define I2S_BCLK       45
+#define I2S_LRC        46
+#define I2S_DOUT       42
+
+// ==========================================
+// MJPEG STREAMING
+// ==========================================
+
+#define PART_BOUNDARY "123456789000000000000987654321"
+static const char *STREAM_CONTENT_TYPE =
+    "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char *STREAM_PART =
+    "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+httpd_handle_t stream_httpd = NULL;
+httpd_handle_t camera_httpd = NULL;
+
+// ==========================================
+// GLOBALS
+// ==========================================
+
+NimBLEServer *pServer = NULL;
+NimBLECharacteristic *pCharacteristic = NULL;
+NimBLECharacteristic *pStatusCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+Preferences preferences;
+String wifiSSID = "";
+String wifiPassword = "";
+
+Audio audio;
+bool isConnected = false;
+bool isRegistered = false;
+bool nightVisionEnabled = false;
+
+String deviceId = "";
+String deviceSecret = "";
+String userId = "default-user";
+
+unsigned long lastWiFiCheck = 0;
+const int WIFI_CHECK_INTERVAL = 30000;
+
+unsigned long lastAutoCapture = 0;
+const int AUTO_CAPTURE_INTERVAL = 300000; // 5 minutes
+
+bool triggerCapture = false;
+bool streamingActive = false;
+
+// ==========================================
+// STATUS / LED HELPERS
+// ==========================================
+
+void setNightVision(bool enabled) {
+  nightVisionEnabled = enabled;
+  digitalWrite(IR_LED_PIN, enabled ? HIGH : LOW);
+  Serial.printf("Night vision: %s\n", enabled ? "ON" : "OFF");
+}
+
+void sendStatus(const char *status) {
+  Serial.printf("Status: %s\n", status);
+  if (deviceConnected && pStatusCharacteristic) {
+    pStatusCharacteristic->setValue(status);
+    pStatusCharacteristic->notify();
+  }
+}
+
+// ==========================================
+// NVS STORAGE
+// ==========================================
+
+void loadWiFiCredentials() {
+  preferences.begin("sally-camera", false);
+  wifiSSID     = preferences.getString("wifi_ssid", "");
+  wifiPassword = preferences.getString("wifi_pass", "");
+  deviceSecret = preferences.getString("device_secret", "");
+  userId       = preferences.getString("user_id", "default-user");
+
+  // Try to load device_id from NVS (set by mobile app via BLE)
+  deviceId = preferences.getString("device_id", "");
+  preferences.end();
+
+  // Fallback to MAC address if no device_id stored
+  if (deviceId.length() == 0) {
+    deviceId = WiFi.macAddress();
+    deviceId.replace(":", "");
+    Serial.println("⚠️  No device_id in NVS, using MAC address as fallback");
+  }
+
+  if (wifiSSID.length() > 0) {
+    Serial.printf("WiFi loaded from NVS: %s\n", wifiSSID.c_str());
+    Serial.printf("Device ID: %s\n", deviceId.c_str());
+  } else {
+    Serial.println("No WiFi credentials in NVS, using defaults");
+    wifiSSID     = DEFAULT_WIFI_SSID;
+    wifiPassword = DEFAULT_WIFI_PASS;
+  }
+}
+
+void saveWiFiCredentials(String ssid, String password) {
+  preferences.begin("sally-camera", false);
+  preferences.putString("wifi_ssid", ssid);
+  preferences.putString("wifi_pass", password);
+  preferences.end();
+  wifiSSID     = ssid;
+  wifiPassword = password;
+  Serial.println("WiFi credentials saved");
+  sendStatus("WIFI_SAVED");
+}
+
+// ==========================================
+// WIFI
+// ==========================================
+
+bool connectWiFi(int timeoutSeconds = 20) {
+  if (wifiSSID.length() == 0) {
+    sendStatus("WIFI_NO_SSID");
+    return false;
+  }
+
+  Serial.printf("Connecting to WiFi: %s\n", wifiSSID.c_str());
+  sendStatus("WIFI_CONNECTING");
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < timeoutSeconds * 2) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    isConnected = true;
+    Serial.printf("\nWiFi Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    sendStatus(("WIFI_CONNECTED:" + WiFi.localIP().toString()).c_str());
+    return true;
+  }
+
+  isConnected = false;
+  Serial.println("\nWiFi Failed");
+  sendStatus("WIFI_FAILED");
+  return false;
+}
+
+// ==========================================
+// BACKEND REGISTRATION
+// ==========================================
+
+void registerDevice() {
+  if (!isConnected || isRegistered) return;
+
+  Serial.println("Registering device with backend...");
+
+  if (deviceSecret.length() == 0) {
+    deviceSecret = String(random(100000, 999999)) + String(millis());
+    preferences.begin("sally-camera", false);
+    preferences.putString("device_secret", deviceSecret);
+    preferences.end();
+  }
+
+  HTTPClient http;
+  http.begin(String(API_HOST) + "/api/camera/register");
+  http.addHeader("Content-Type", "application/json");
+
+  String payload = "{";
+  payload += "\"device_id\":\"" + deviceId + "\",";
+  payload += "\"device_name\":\"Sally-Kitchen\",";
+  payload += "\"user_id\":\"" + userId + "\",";
+  payload += "\"device_secret\":\"" + deviceSecret + "\"";
+  payload += "}";
+
+  int code = http.POST(payload);
+  if (code == 200) {
+    Serial.println("Device registered successfully!");
+    isRegistered = true;
+    sendStatus("DEVICE_REGISTERED");
+  } else {
+    Serial.printf("Registration failed: %d\n", code);
+    sendStatus("REGISTRATION_FAILED");
+  }
+  http.end();
+}
+
+// ==========================================
+// SNAPSHOT UPLOAD
+// ==========================================
+
+void uploadSnapshot(String imageB64) {
+  if (!isConnected || !isRegistered) return;
+
+  sendStatus("UPLOADING");
+  HTTPClient http;
+  http.begin(String(API_HOST) + "/api/camera/capture");
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-ID", deviceId);
+  http.addHeader("X-Device-Secret", deviceSecret);
+
+  String payload = "{";
+  payload += "\"image\":\"" + imageB64 + "\",";
+  payload += "\"timestamp\":" + String(millis()) + ",";
+  payload += "\"device_id\":\"" + deviceId + "\",";
+  payload += "\"device_secret\":\"" + deviceSecret + "\"";
+  payload += "}";
+
+  int code = http.POST(payload);
+  if (code == 200) {
+    Serial.println("Snapshot uploaded!");
+    sendStatus("UPLOAD_SUCCESS");
+  } else {
+    Serial.printf("Upload failed: %d\n", code);
+    sendStatus("UPLOAD_FAILED");
+  }
+  http.end();
+}
+
+void captureAndUpload() {
+  if (!isConnected) return;
+  sendStatus("CAPTURING");
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    sendStatus("CAPTURE_FAILED");
+    return;
+  }
+
+  String imageB64 = base64::encode(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  uploadSnapshot(imageB64);
+}
+
+// ==========================================
+// MJPEG STREAM HANDLER
+// ==========================================
+
+esp_err_t stream_handler(httpd_req_t *req) {
+  camera_fb_t *fb = NULL;
+  esp_err_t res = ESP_OK;
+  size_t jpg_len = 0;
+  uint8_t *jpg_buf = NULL;
+  char part_buf[64];
+
+  res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+  if (res != ESP_OK) return res;
+
+  // Disable response buffering for streaming
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  Serial.println("Stream client connected");
+
+  while (true) {
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Camera capture failed");
+      res = ESP_FAIL;
+      break;
+    }
+
+    if (fb->format != PIXFORMAT_JPEG) {
+      bool ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      if (!ok) { res = ESP_FAIL; break; }
+    } else {
+      jpg_buf = fb->buf;
+      jpg_len = fb->len;
+    }
+
+    // Send boundary
+    res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+
+    // Send part header
+    if (res == ESP_OK) {
+      size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, jpg_len);
+      res = httpd_resp_send_chunk(req, part_buf, hlen);
+    }
+
+    // Send JPEG data
+    if (res == ESP_OK) {
+      res = httpd_resp_send_chunk(req, (const char *)jpg_buf, jpg_len);
+    }
+
+    // Free frame buffer
+    if (fb) {
+      esp_camera_fb_return(fb);
+      fb = NULL;
+    } else {
+      free(jpg_buf);
+      jpg_buf = NULL;
+    }
+
+    if (res != ESP_OK) break;
+    delay(100); // ~10 FPS
+  }
+
+  Serial.println("Stream client disconnected");
+  return res;
+}
+
+// Single capture endpoint
+esp_err_t capture_handler(httpd_req_t *req) {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_send(req, (const char *)fb->buf, fb->len);
+
+  esp_camera_fb_return(fb);
+  return ESP_OK;
+}
+
+// Status endpoint
+esp_err_t status_handler(httpd_req_t *req) {
+  char json[256];
+  snprintf(json, sizeof(json),
+    "{\"device_id\":\"%s\",\"wifi\":\"%s\",\"registered\":%s,"
+    "\"night_vision\":%s,\"ip\":\"%s\"}",
+    deviceId.c_str(),
+    WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
+    isRegistered ? "true" : "false",
+    nightVisionEnabled ? "true" : "false",
+    WiFi.localIP().toString().c_str()
+  );
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_send(req, json, strlen(json));
+  return ESP_OK;
+}
+
+void stopCameraServer() {
+  if (camera_httpd) { httpd_stop(camera_httpd); camera_httpd = NULL; }
+  if (stream_httpd)  { httpd_stop(stream_httpd);  stream_httpd  = NULL; }
+}
+
+void startCameraServer() {
+  // Stop any existing servers before restarting (e.g. after WiFi reconnect)
+  stopCameraServer();
+
+  // Port 80: capture + status
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.server_port = 80;
+  config.max_open_sockets = 4;
+  config.lru_purge_enable = true;
+
+  httpd_uri_t capture_uri = { "/capture", HTTP_GET, capture_handler, NULL };
+  httpd_uri_t status_uri  = { "/",        HTTP_GET, status_handler,  NULL };
+
+  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &capture_uri);
+    httpd_register_uri_handler(camera_httpd, &status_uri);
+    Serial.printf("Camera server: http://%s/capture\n", WiFi.localIP().toString().c_str());
+  }
+
+  // Port 81: MJPEG stream
+  httpd_config_t stream_config = HTTPD_DEFAULT_CONFIG();
+  stream_config.server_port = 81;
+  stream_config.max_open_sockets = 2;
+  stream_config.lru_purge_enable = true;
+
+  httpd_uri_t stream_uri = { "/stream", HTTP_GET, stream_handler, NULL };
+
+  if (httpd_start(&stream_httpd, &stream_config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.printf("Stream server:  http://%s:81/stream\n", WiFi.localIP().toString().c_str());
+  }
+}
+
+// ==========================================
+// BLE CALLBACKS
+// ==========================================
+
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *pSrv) override {
+    deviceConnected = true;
+    Serial.println("BLE client connected");
+  }
+  void onDisconnect(NimBLEServer *pSrv) override {
+    deviceConnected = false;
+    Serial.println("BLE client disconnected");
+  }
+};
+
+class CharCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pChar) override {
+    std::string val = pChar->getValue();
+    if (val.empty()) return;
+
+    String cmd = String(val.c_str());
+    Serial.printf("BLE cmd: %s\n", cmd.c_str());
+
+    if (cmd == "CAPTURE" || cmd == "capture") {
+      triggerCapture = true;
+
+    } else if (cmd == "NIGHT_ON" || cmd == "night_on") {
+      setNightVision(true);
+      sendStatus("NIGHT_ON");
+
+    } else if (cmd == "NIGHT_OFF" || cmd == "night_off") {
+      setNightVision(false);
+      sendStatus("NIGHT_OFF");
+
+    } else if (cmd == "WIFI_STATUS" || cmd == "wifi_status") {
+      if (WiFi.status() == WL_CONNECTED) {
+        String s = "WIFI_CONNECTED:" + WiFi.localIP().toString();
+        sendStatus(s.c_str());
+      } else {
+        sendStatus("WIFI_DISCONNECTED");
+      }
+
+    } else if (cmd == "STREAM_URL" || cmd == "stream_url") {
+      // Returns stream URL so mobile app can connect directly
+      String url = "http://" + WiFi.localIP().toString() + ":81/stream";
+      sendStatus(url.c_str());
+
+    } else if (cmd == "CAPTURE_URL" || cmd == "capture_url") {
+      String url = "http://" + WiFi.localIP().toString() + "/capture";
+      sendStatus(url.c_str());
+
+    } else if (cmd.startsWith("DEVICE_ID:")) {
+      // Format: DEVICE_ID:BACD5103-9228-646C-B3A4-EFFA363428FE
+      // Mobile app sends BLE UUID to sync device identity
+      deviceId = cmd.substring(10);
+      preferences.begin("sally-camera", false);
+      preferences.putString("device_id", deviceId);
+      preferences.end();
+      Serial.printf("Device ID set to: %s\n", deviceId.c_str());
+      sendStatus(("DEVICE_ID_SET:" + deviceId).c_str());
+
+    } else if (cmd.startsWith("WIFI_CONFIG:")) {
+      // Format: WIFI_CONFIG:SSID:PASSWORD
+      int sep = cmd.indexOf(':', 12);
+      if (sep > 0) {
+        String ssid = cmd.substring(12, sep);
+        String pass = cmd.substring(sep + 1);
+        saveWiFiCredentials(ssid, pass);
+        WiFi.disconnect();
+        delay(1000);
+        if (connectWiFi()) {
+          registerDevice();
+          startCameraServer();
+        }
+      }
+    }
+  }
+};
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup() {
+  Serial.begin(115200);
+  // USB CDC takes ~1s to enumerate on host; give it time before printing
+  delay(1000);
+  Serial.println("\nSally AI Camera Starting...");
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(IR_LED_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  digitalWrite(LED_PIN, HIGH);   // LED on during boot
+  digitalWrite(IR_LED_PIN, LOW); // IR off by default
+
+  // LittleFS for audio buffering
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS mount failed");
+  }
+
+  // Load stored WiFi credentials
+  loadWiFiCredentials();
+
+  // --- BLE Init ---
+  NimBLEDevice::init("Sally by HeySalad XJVZ");
+  pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
+  NimBLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+      CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+  pCharacteristic->setCallbacks(new CharCallbacks());
+
+  pStatusCharacteristic = pService->createCharacteristic(
+      STATUS_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+
+  pService->start();
+  NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+  pAdv->addServiceUUID(SERVICE_UUID);
+  pAdv->setScanResponse(true);
+  pAdv->start();
+  Serial.println("BLE advertising started");
+
+  // --- Camera Init (DFR1154 / OV3660) ---
+  // CRITICAL: Delay to allow PSRAM to stabilize after boot (prevents boot loop)
+  delay(500);
+
+  Serial.println("Initializing camera...");
+  if (psramFound()) {
+    Serial.printf("PSRAM: %d bytes free\n", ESP.getFreePsram());
+  } else {
+    Serial.println("WARNING: PSRAM not detected!");
+  }
+  Serial.printf("Heap: %d bytes free\n", ESP.getFreeHeap());
+
+  camera_config_t config;
+  config.ledc_channel  = LEDC_CHANNEL_0;
+  config.ledc_timer    = LEDC_TIMER_0;
+  config.pin_d0        = Y2_GPIO_NUM;
+  config.pin_d1        = Y3_GPIO_NUM;
+  config.pin_d2        = Y4_GPIO_NUM;
+  config.pin_d3        = Y5_GPIO_NUM;
+  config.pin_d4        = Y6_GPIO_NUM;
+  config.pin_d5        = Y7_GPIO_NUM;
+  config.pin_d6        = Y8_GPIO_NUM;
+  config.pin_d7        = Y9_GPIO_NUM;
+  config.pin_xclk      = XCLK_GPIO_NUM;
+  config.pin_pclk      = PCLK_GPIO_NUM;
+  config.pin_vsync     = VSYNC_GPIO_NUM;
+  config.pin_href      = HREF_GPIO_NUM;
+  config.pin_sccb_sda  = SIOD_GPIO_NUM;
+  config.pin_sccb_scl  = SIOC_GPIO_NUM;
+  config.pin_pwdn      = PWDN_GPIO_NUM;
+  config.pin_reset     = RESET_GPIO_NUM;
+  config.xclk_freq_hz  = 20000000;
+  config.pixel_format  = PIXFORMAT_JPEG;
+  config.grab_mode     = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location   = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality  = 12;  // Start conservative
+  config.fb_count      = 1;   // Start with single buffer
+
+  // BOOT LOOP FIX: Start with VGA (640x480) instead of SVGA (800x600)
+  // VGA uses less memory and prevents allocation failures during init
+  if (psramFound()) {
+    config.frame_size   = FRAMESIZE_VGA;  // 640x480 - safe for init
+    config.jpeg_quality = 12;
+    config.fb_count     = 2;
+  } else {
+    config.frame_size   = FRAMESIZE_QVGA; // 320x240 fallback
+    config.jpeg_quality = 15;
+    config.fb_count     = 1;
+    config.fb_location  = CAMERA_FB_IN_DRAM;
+  }
+
+  Serial.println("Starting camera initialization...");
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init FAILED: 0x%x\n", err);
+    Serial.println("Common fixes:");
+    Serial.println("  1. Check camera module connection");
+    Serial.println("  2. Verify PSRAM is properly enabled");
+    Serial.println("  3. Try power cycling the device");
+    Serial.printf("Free memory - Heap: %d, PSRAM: %d\n",
+                  ESP.getFreeHeap(), ESP.getFreePsram());
+    sendStatus("CAMERA_FAILED");
+    // Continue without camera — WiFi/BLE still functional
+  } else {
+    Serial.println("✓ Camera initialized successfully!");
+    Serial.printf("  Resolution: VGA (640x480)\n");
+    Serial.printf("  JPEG Quality: %d\n", config.jpeg_quality);
+    Serial.printf("  Frame buffers: %d\n", config.fb_count);
+    Serial.printf("  Free memory - Heap: %d, PSRAM: %d\n",
+                  ESP.getFreeHeap(), ESP.getFreePsram());
+    sendStatus("CAMERA_READY");
+
+    // Delay after init to stabilize
+    delay(100);
+
+    // OV3660-specific corrections
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+      Serial.printf("Camera sensor PID: 0x%x\n", s->id.PID);
+
+      if (s->id.PID == OV3660_PID) {
+        Serial.println("Applying OV3660 corrections...");
+        s->set_vflip(s, 1);       // flip vertically
+        s->set_brightness(s, 1);  // slightly brighter
+        s->set_saturation(s, -2); // reduce over-saturation
+        Serial.println("✓ OV3660 corrections applied");
+      }
+
+      // Optional: Upgrade to SVGA after successful init if PSRAM available
+      // Uncomment to enable higher resolution (may increase memory usage)
+      /*
+      if (psramFound() && ESP.getFreePsram() > 2000000) {
+        Serial.println("Upgrading resolution to SVGA (800x600)...");
+        s->set_framesize(s, FRAMESIZE_SVGA);
+        Serial.println("✓ Resolution upgraded");
+      }
+      */
+    }
+  }
+
+  // --- Audio Init ---
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audio.setVolume(12);
+  Serial.println("Audio initialized");
+
+  // --- WiFi + Backend ---
+  if (connectWiFi()) {
+    registerDevice();
+    startCameraServer();
+    digitalWrite(LED_PIN, LOW); // LED off = ready
+  }
+
+  Serial.println("Sally Camera Ready!");
+  sendStatus("READY");
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+
+void loop() {
+  audio.loop();
+
+  unsigned long now = millis();
+
+  // WiFi reconnection
+  if (now - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+    lastWiFiCheck = now;
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi lost, reconnecting...");
+      isConnected = false;
+      isRegistered = false;
+      if (connectWiFi(10)) {
+        registerDevice();
+        startCameraServer();
+      }
+    }
+  }
+
+  // Auto-capture every 5 minutes
+  if (isConnected && isRegistered && (now - lastAutoCapture >= AUTO_CAPTURE_INTERVAL)) {
+    Serial.println("Auto-capture triggered");
+    captureAndUpload();
+    lastAutoCapture = now;
+  }
+
+  // BLE-triggered capture
+  if (triggerCapture) {
+    triggerCapture = false;
+    captureAndUpload();
+  }
+
+  // Physical button capture (BOOT button = GPIO0)
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    delay(50); // debounce
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      captureAndUpload();
+      delay(2000); // prevent rapid fire
+    }
+  }
+
+  // BLE management
+  if (!deviceConnected && oldDeviceConnected) {
+    delay(500);
+    pServer->startAdvertising();
+    Serial.println("BLE advertising restarted");
+    oldDeviceConnected = deviceConnected;
+  }
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+    // Send current status on connect
+    if (WiFi.status() == WL_CONNECTED) {
+      String s = "WIFI_CONNECTED:" + WiFi.localIP().toString();
+      sendStatus(s.c_str());
+    } else {
+      sendStatus("WIFI_DISCONNECTED");
+    }
+  }
+}

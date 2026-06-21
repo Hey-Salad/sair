@@ -1,0 +1,68 @@
+---
+description: 'HeySalad menu kiosk with optional voice narration'
+import:
+  - python-console-app-template
+---
+
+***definitions***
+
+- :MenuItem: describes a single item on the kiosk's menu. :MenuItem: has the following attributes
+  - Name - the item's name. Required.
+  - Description - a short, appetising description of the item. Required.
+  - Price - the item's price as a decimal number, e.g. 8.50. Required.
+  - Category - one of "Starter", "Main", or "Drink". Required.
+
+- :Menu: is the fixed list of :MenuItem: built into :App:. :Menu: contains exactly these items
+  - "House Salad", Starter, 6.50, "Mixed greens, cherry tomatoes, cucumber, house dressing."
+  - "Soup of the Day", Starter, 5.00, "Ask your server what's fresh today."
+  - "Grain Bowl", Main, 9.50, "Quinoa, roasted vegetables, chickpeas, tahini dressing."
+  - "Grilled Chicken Wrap", Main, 8.00, "Grilled chicken, lettuce, tomato, garlic sauce, warm wrap."
+  - "Veggie Burger", Main, 8.50, "House-made veggie patty, brioche bun, pickles, aioli."
+  - "Fresh Lemonade", Drink, 3.50, "Squeezed daily, lightly sweetened."
+  - "Iced Green Tea", Drink, 3.00, "Unsweetened, served over ice."
+
+***implementation reqs***
+
+- :MainExecutableFile: of :App: should be called "menu_kiosk.py".
+
+- :Menu: should be hard-coded directly in the source as the items listed above. No external file or network call should be needed to load it.
+
+- :App: should read an ElevenLabs API key from the ELEVENLABS_API_KEY environment variable and a voice id from the ELEVENLABS_VOICE_ID environment variable. Both are only needed when narration is requested.
+
+***functional specs***
+
+- :App: should accept a single command-line argument "--menu" and, when given, print every :MenuItem: in :Menu: grouped by Category, showing each item's Name and Price.
+
+  ***acceptance tests***
+
+  - Given "--menu", :App: should exit with status code 0 and print all three Category names: "Starter", "Main", and "Drink".
+
+- :App: should accept a command-line argument that exactly matches a :MenuItem: Name and print that item's Name, Description, Price, and Category.
+
+  ***acceptance tests***
+
+  - Given the argument "Grain Bowl", :App: should exit with status code 0 and print that item's Description.
+
+  - Given an argument that matches no :MenuItem: Name, :App: should exit with status code 1 and print an error message to stderr.
+
+- :App: should accept an optional second argument "--narrate" alongside a valid :MenuItem: Name. When ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID are both set, :App: should call the ElevenLabs text-to-speech API to synthesize that item's Description into spoken audio, save it to a file named "narration.mp3" in the current directory, and print a confirmation message.
+
+  ***acceptance tests***
+
+  - Given a valid :MenuItem: Name, "--narrate", and both environment variables set (mocked in tests), :App: should attempt the ElevenLabs API call and, on success, exit with status code 0 and print a confirmation that included "narration.mp3".
+
+- :App: should treat "--narrate" as optional and degrade gracefully: if ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID is missing, :App: should skip narration entirely, print a message that narration is unavailable in this environment, and still exit with status code 0 for the underlying menu item lookup.
+
+  ***acceptance tests***
+
+  - Given a valid :MenuItem: Name and "--narrate" with ELEVENLABS_API_KEY unset, :App: should exit with status code 0, print a message indicating narration was skipped, and should not create "narration.mp3".
+
+- :App: should accept an optional "--json" flag alongside any other arguments and, when present, print its result as a single JSON object to stdout instead of human-readable text, for "--menu", "--item", and "--narrate".
+
+  ***acceptance tests***
+
+  - Given "--menu" and "--json", :App: should exit with status code 0 and print valid JSON containing all three Category names.
+
+  - Given "--item" "Grain Bowl" and "--json", :App: should exit with status code 0 and print valid JSON with a "description" field.
+
+  - Given "--item" "Grain Bowl" "--narrate" "--json" with ELEVENLABS_API_KEY unset, :App: should exit with status code 0 and print valid JSON whose "narrated" field is false.

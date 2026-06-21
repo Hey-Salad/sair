@@ -1,0 +1,5 @@
+[
+  {"name": "Tomatoes", "estimated_qty": "3 crates", "status": "critical"},
+  {"name": "Olive oil", "estimated_qty": "2 bottles", "status": "low"},
+  {"name": "Rice", "estimated_qty": "12 bags", "status": "ok"}
+]

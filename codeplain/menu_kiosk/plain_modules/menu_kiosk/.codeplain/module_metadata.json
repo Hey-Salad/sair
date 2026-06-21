@@ -1,0 +1,11 @@
+{
+    "source_hash": "d86ba6e96c39075f26b39338da3feaef2cef3ad9575d5819bdaa934c88ae3cef",
+    "non_functional_source_hash": "3aa879e7fff1d915bbb288d1bd00ec87aac647021fb3a83115740cfd43f8ef4b",
+    "functionalities": [
+        "- :App: should accept a single command-line argument \"--menu\" and, when given, print every :MenuItem: in :Menu: grouped by Category, showing each item's Name and Price.",
+        "- :App: should accept a command-line argument that exactly matches a :MenuItem: Name and print that item's Name, Description, Price, and Category.",
+        "- :App: should accept an optional second argument \"--narrate\" alongside a valid :MenuItem: Name. When ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID are both set, :App: should call the ElevenLabs text-to-speech API to synthesize that item's Description into spoken audio, save it to a file named \"narration.mp3\" in the current directory, and print a confirmation message.",
+        "- :App: should treat \"--narrate\" as optional and degrade gracefully: if ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID is missing, :App: should skip narration entirely, print a message that narration is unavailable in this environment, and still exit with status code 0 for the underlying menu item lookup.",
+        "- :App: should accept an optional \"--json\" flag alongside any other arguments and, when present, print its result as a single JSON object to stdout instead of human-readable text, for \"--menu\", \"--item\", and \"--narrate\"."
+    ]
+}

@@ -1,0 +1,74 @@
+---
+description: 'Reorder decision agent for commercial kitchen stock'
+import:
+  - python-console-app-template
+---
+
+***definitions***
+
+- :StockItem: describes a single item observed in a kitchen's inventory. :StockItem: has the following attributes
+  - Name - the name of the item. Required.
+  - Estimated Quantity - a short human-readable description of how much is left, e.g. "3 crates". Required.
+  - Status - one of "ok", "low", or "critical", describing how urgently the item needs restocking. Required.
+
+- :StockReport: is a list of :StockItem: provided as input to :App:.
+
+- :ReorderAction: describes a recommended restock for a :StockItem: that needs attention. :ReorderAction: has the following attributes
+  - Item Name - the name of the :StockItem: this action is for.
+  - Reasoning - a short, human-readable explanation of why this item needs reordering, mentioning the item's name.
+  - Suggested Order - a short, human-readable restock suggestion derived from the item's name and estimated quantity.
+  - Urgency - one of "high" or "medium".
+
+- :ReorderPlan: is the list of :ReorderAction: produced as output by :App:.
+
+***implementation reqs***
+
+- :MainExecutableFile: of :App: should be called "reorder_agent.py".
+
+- :App: should accept exactly one command-line argument: the file path to a JSON file containing :StockReport:, encoded as a JSON array of objects each with "name", "estimated_qty", and "status" fields.
+
+- :App: should print :ReorderPlan: to stdout as a JSON array, where each :ReorderAction: is encoded as an object with "item", "reasoning", "suggested_order", and "urgency" fields.
+
+***functional specs***
+
+- :App: should read :StockReport: from the JSON file at the path given in its command-line argument.
+
+  ***acceptance tests***
+
+  - :App: should exit with status code 1 and print an error message to stderr if no file path argument is provided.
+
+  - :App: should exit with status code 1 and print an error message to stderr if the given file does not contain valid JSON.
+
+- :App: should generate a :ReorderAction: with Urgency "high" for every :StockItem: in :StockReport: whose Status is "critical".
+
+  ***acceptance tests***
+
+  - Given a :StockReport: containing one :StockItem: named "Tomatoes" with Status "critical", :App: should output exactly one :ReorderAction: with Item Name "Tomatoes" and Urgency "high".
+
+  - The Reasoning of that :ReorderAction: should mention "Tomatoes".
+
+- :App: should generate a :ReorderAction: with Urgency "medium" for every :StockItem: in :StockReport: whose Status is "low".
+
+  ***acceptance tests***
+
+  - Given a :StockReport: containing one :StockItem: named "Olive oil" with Status "low", :App: should output exactly one :ReorderAction: with Item Name "Olive oil" and Urgency "medium".
+
+- :App: should not generate a :ReorderAction: for any :StockItem: whose Status is "ok".
+
+  ***acceptance tests***
+
+  - Given a :StockReport: where every :StockItem: has Status "ok", :App: should output an empty :ReorderPlan:.
+
+- :App: should set Suggested Order on every generated :ReorderAction: to a non-empty, human-readable restock suggestion that references the item's name.
+
+  ***acceptance tests***
+
+  - For every :ReorderAction: in a non-empty :ReorderPlan:, Suggested Order should be a non-empty string containing the item's name.
+
+- :App: should print the complete :ReorderPlan: as a JSON array to stdout and exit with status code 0 after a successful run.
+
+  ***acceptance tests***
+
+  - :App: should exit with status code 0 indicating successful execution.
+
+  - The text printed to stdout should be valid JSON parsable as an array.
