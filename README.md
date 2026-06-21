@@ -174,6 +174,34 @@ sair/
 
 ---
 
+## Live Streams (Eve)
+
+The Eve platform includes a **Streams** page at `/streams` with real-time camera viewers and AI object detection.
+
+```
+ ┌─────────────────────────────────────────────────────────────┐
+ │  Eve Streams — /streams                                     │
+ │  https://eve-six-flax.vercel.app/streams                    │
+ │                                                             │
+ │  ┌────────────────────────┐  ┌────────────────────────────┐ │
+ │  │  Sally Cam 1 (Kitchen) │  │  Sally Cam 2 (Fridge)      │ │
+ │  │  WebSocket → JPEG      │  │  WebSocket → JPEG          │ │
+ │  │  DETR detection overlay│  │  DETR detection overlay    │ │
+ │  │  [Connect] [Detect]    │  │  [Connect] [Detect]        │ │
+ │  │  [Auto] [Night] [Snap] │  │  [Auto] [Night] [Snap]    │ │
+ │  └────────────────────────┘  └────────────────────────────┘ │
+ │                                                             │
+ │  Features:                                                  │
+ │  • Live JPEG frames via WebSocket                           │
+ │  • DETR ResNet-50 object detection (edge + browser)         │
+ │  • Bounding boxes with confidence scores                    │
+ │  • Night vision toggle, snapshot download                   │
+ │  • FPS counter, frame count, resolution display             │
+ └─────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Multi-Tenant Platform Architecture (Eve)
 
 ```
@@ -239,6 +267,7 @@ Two kitchen operations agents written in **plain English** and compiled to Pytho
 | Vision detect API | sally-api.heysalad.app/api/vision/detect | Cloudflare Workers AI |
 | Heartbeat endpoint | heysalad-os.vercel.app/api/vision/ingest/heartbeat | Vercel |
 | Eve AI workspace | app.heysalad.io | Vercel |
+| Eve Streams (live cameras) | eve-six-flax.vercel.app/streams | Vercel |
 | Camera viewer | live.html (self-hosted) | Static HTML |
 
 ---

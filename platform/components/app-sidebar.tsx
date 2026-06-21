@@ -3,6 +3,7 @@
 import Image from "next/image"
 import { useTheme } from "next-themes"
 import { useEffect, useState } from "react"
+import Link from "next/link"
 import {
   PanelLeft,
   SquarePen,
@@ -14,6 +15,7 @@ import {
   FolderPlus,
   Settings,
   LogOut,
+  Video,
 } from "lucide-react"
 import type { Tenant } from "@/lib/types"
 
@@ -87,6 +89,13 @@ export function AppSidebar({
               <Icon className="size-5 text-muted-foreground" />
             </button>
           ))}
+          <Link
+            href="/streams"
+            title="Streams"
+            className="flex size-11 items-center justify-center rounded-lg text-sidebar-foreground transition-colors hover:bg-sidebar-accent"
+          >
+            <Video className="size-5 text-red-400" />
+          </Link>
         </nav>
       </aside>
     )
@@ -128,6 +137,13 @@ export function AppSidebar({
             <span>{label}</span>
           </button>
         ))}
+        <Link
+          href="/streams"
+          className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-[15px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent"
+        >
+          <Video className="size-5 shrink-0 text-red-400" />
+          <span>Streams</span>
+        </Link>
       </nav>
 
       {/* Projects */}
