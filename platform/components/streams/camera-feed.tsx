@@ -67,15 +67,42 @@ export function CameraFeed({ camera }: CameraProps) {
       return
     }
 
-    canvas.width = img.naturalWidth
-    canvas.height = img.naturalHeight
+    // Match canvas pixel size to its CSS display size for crisp rendering
+    const rect = canvas.getBoundingClientRect()
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = rect.width * dpr
+    canvas.height = rect.height * dpr
     const ctx = canvas.getContext("2d")
     if (!ctx) return
+    ctx.scale(dpr, dpr)
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.clearRect(0, 0, rect.width, rect.height)
+
+    // Calculate object-contain offset and scale
+    const imgAspect = img.naturalWidth / img.naturalHeight
+    const containerAspect = rect.width / rect.height
+    let renderW: number, renderH: number, offsetX: number, offsetY: number
+    if (imgAspect > containerAspect) {
+      renderW = rect.width
+      renderH = rect.width / imgAspect
+      offsetX = 0
+      offsetY = (rect.height - renderH) / 2
+    } else {
+      renderH = rect.height
+      renderW = rect.height * imgAspect
+      offsetX = (rect.width - renderW) / 2
+      offsetY = 0
+    }
+    const scaleX = renderW / img.naturalWidth
+    const scaleY = renderH / img.naturalHeight
 
     for (const det of detections) {
-      const { xmin, ymin, xmax, ymax } = det.box
+      const { xmin: rawXmin, ymin: rawYmin, xmax: rawXmax, ymax: rawYmax } = det.box
+      // Map from image-pixel coords to canvas display coords
+      const xmin = rawXmin * scaleX + offsetX
+      const ymin = rawYmin * scaleY + offsetY
+      const xmax = rawXmax * scaleX + offsetX
+      const ymax = rawYmax * scaleY + offsetY
       const isEdge = det.source === "edge"
       const color = isEdge ? "245,158,11" : "139,92,246"
 
@@ -206,16 +233,18 @@ export function CameraFeed({ camera }: CameraProps) {
         body: blobRef.current,
       })
       const json = await res.json()
+      console.log("[Detect] Response:", json)
       if (json.ok) {
         const filtered = (json.detections || [])
           .filter((d: Detection) => d.score >= 0.25)
           .map((d: Detection) => ({ ...d, source: "browser" as const }))
+        console.log("[Detect] Filtered detections:", filtered)
         setDetections((prev) => [
           ...prev.filter((p) => p.source !== "browser"),
           ...filtered,
         ])
       }
-    } catch {}
+    } catch (err) { console.error("[Detect] Error:", err) }
     setDetecting(false)
   }, [detecting])
 
