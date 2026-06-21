@@ -1,85 +1,262 @@
-# Sally Air
+# SAIR — Sally Air
 
-**An end-to-end IoT air quality platform by HeySalad — from sensor firmware to mobile app to AI workspace.**
+**Full-stack IoT air quality + camera platform by HeySalad. From ESP32 firmware to mobile app to AI workspace — built in a single hackathon weekend.**
 
-Sally Air is a full-stack system for monitoring, visualising, and acting on indoor air quality data in commercial kitchens and food venues. It combines custom ESP32 camera firmware, a React Native mobile app, a multi-tenant AI workspace, a live camera viewer, and plain-language AI agents — all built during a single hackathon weekend.
+Sally Air is an end-to-end system for monitoring indoor air quality and camera feeds in commercial kitchens and food venues. A sensor camera streams frames and PM readings to the cloud, a React Native app gives operators real-time AQI gauges, and a multi-tenant AI workspace lets food businesses chat with an agent about their environment.
 
 ---
 
-## Architecture
+## Monorepo Structure
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Sally Air                          │
-├──────────┬──────────┬──────────┬──────────┬─────────────┤
-│ firmware │  mobile  │ platform │ camera-  │  codeplain  │
-│          │          │          │ viewer   │             │
-│ ESP32-S3 │ React    │ Next.js  │ Live     │ Plain-lang  │
-│ Camera + │ Native   │ AI       │ feed +   │ AI agents   │
-│ Sensors  │ Expo app │ Workspace│ AI vision│             │
-└──────────┴──────────┴──────────┴──────────┴─────────────┘
+sair/
+├── mobile/         React Native (Expo) — IoT air quality monitor + device management
+├── platform/       Next.js 16 — Eve AI workspace, Vercel for Platforms multi-tenant
+├── firmware/       PlatformIO — ESP32-S3 camera + sensor firmware
+├── camera-viewer/  Standalone HTML — live feed with AI vision overlay
+└── codeplain/      Plain-language agents — menu kiosk + stock reorder (Codeplain)
 ```
 
 ---
 
-## Components
+## System Architecture
 
-### `/firmware` — Sally Camera Firmware (ESP32-S3)
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                              SALLY AIR PLATFORM                                 │
+└──────────────────────────────────────────────────────────────────────────────────┘
 
-IoT device firmware for the DFRobot DFR1154 ESP32-S3 AI Camera module.
+  HARDWARE                       CLOUD SERVICES                         CLIENTS
+ ┌────────────────┐
+ │  ESP32-S3      │
+ │  DFR1154       │──┐
+ │  + OV3660 Cam  │  │
+ │  + IR LEDs     │  │  WebSocket (TLS)
+ │  + PDM Mic     │  │  JPEG frames @ 10 FPS
+ │  + I2S Speaker │  │
+ └────────────────┘  │
+                     │
+                     ▼
+        ┌──────────────────────┐     ┌──────────────────────┐
+        │  Cloudflare Worker   │────▶│  Vercel              │
+        │  sally-camera-stream │     │  heysalad-os         │
+        │  WebSocket relay     │     │  /api/vision/ingest  │
+        │  + snapshot API      │     │  heartbeat endpoint  │
+        └──────────┬───────────┘     └──────────┬───────────┘
+                   │                             │
+                   │  frames + AQ data           │  heartbeat + status
+                   ▼                             ▼
+        ┌──────────────────────┐     ┌──────────────────────┐
+        │  Cloudflare          │     │  Vercel              │
+        │  Workers AI          │     │  Eve Platform        │
+        │  DETR object detect  │     │  Next.js 16          │
+        │  sally-api/vision    │     │  app.heysalad.io     │
+        └──────────────────────┘     └──────────────────────┘
+                                              │
+        ┌──────────────────────┐              │
+        │  Mobile App          │◀─────────────┘
+        │  Sally Air (Expo)    │
+        │  iOS + Android       │
+        └──────────────────────┘
 
-- **Camera**: OV3660 sensor, VGA streaming @ 10 FPS over WebSocket
-- **Cloud-native device flow**: Auto-registration with Sally API, JWT heartbeat tokens
-- **Connectivity**: WiFi with captive portal setup, optional SIM800L cellular
-- **AI-ready**: 4MB flash partition reserved for YOLO11n edge inference
-- **Night vision**: IR LED with PWM control
-- **Audio**: PDM microphone + I2S speaker for voice commands
+        ┌──────────────────────┐
+        │  Camera Viewer       │
+        │  live.html           │◀──── WebSocket viewer
+        └──────────────────────┘
+```
 
-**Stack**: PlatformIO, Arduino framework, ArduinoJson, NimBLE, ESPAsyncWebServer
+---
 
-### `/mobile` — Sally Air Mobile App (React Native)
+## Data Flow
 
-IoT air quality monitoring app with a dark-themed UI.
+```
+ ┌───────────┐  JPEG + JSON    ┌─────────────┐  forward     ┌──────────────┐
+ │  ESP32-S3 │ ──────────────▶ │  CF Worker   │ ──────────▶ │  Viewers     │
+ │  Camera   │  WebSocket      │  sally-cam-  │  WebSocket   │  (mobile,    │
+ │           │  10 FPS         │  stream      │              │   browser)   │
+ └───────────┘                 └──────┬──────┘              └──────────────┘
+                                      │
+      ┌───────────────────────────────┘
+      │  POST /api/vision/detect
+      ▼
+ ┌─────────────┐                ┌─────────────┐
+ │  Workers AI │  detections    │  Vercel API  │
+ │  DETR       │ ──────────────▶│  heartbeat   │
+ │  object det │                │  + status    │
+ └─────────────┘                └──────┬──────┘
+                                       │
+      ┌────────────────────────────────┘
+      │  device status
+      ▼
+ ┌─────────────┐
+ │  Eve        │  AI chat about
+ │  Platform   │  environment &
+ │             │  camera feeds
+ └─────────────┘
 
-- **Dashboard**: Real-time AQI gauge, temperature, humidity, pressure, gas readings
-- **Device management**: BLE-based device pairing and configuration
-- **Live streaming**: WebSocket-connected live data from sensors
-- **Charts**: Historical air quality trends and analytics
-- **Map view**: Device locations with status indicators
+ WebSocket Frame Message:
+ { binary JPEG frame }
 
-**Stack**: Expo SDK, React Native, TypeScript, BLE integration
+ Heartbeat Payload:
+ {
+   "device_id": "CCBA9716248C",
+   "firmware_version": "2.1.0",
+   "ip": "192.168.1.124",
+   "rssi": -52,
+   "wifi_ssid": "HeySalad-Kitchen",
+   "frames_sent": 14832,
+   "uptime_ms": 3600000
+ }
+```
 
-### `/platform` — Eve AI Workspace (Next.js)
+---
 
-Multi-tenant AI workspace for food businesses, built on Vercel for Platforms.
+## BLE Provisioning Flow
 
-- **Multi-tenancy**: Tenant-scoped data with three-host routing (marketing / app / tenant subdomains)
-- **AI chat**: ChatGPT-style interface powered by the Eve agent runtime
-- **Auth**: HeySalad OAuth (Google, GitHub, Email OTP) with session management
-- **Credits & billing**: Append-only credit ledger with usage metering
-- **Custom domains**: Vercel domain provisioning with Cloudflare DNS integration
-- **Marketing site**: Landing page, features, pricing, FAQ
+```
+ ┌──────────────┐   1. BLE scan   ┌──────────────┐
+ │  Mobile App  │ ──────────────▶ │  ESP32-S3    │
+ │  Sally Air   │                 │  "Sally-XXX" │
+ └──────┬───────┘                 └──────┬───────┘
+        │                                │
+        │  2. Connect + OTP verify       │
+        │◀──────────────────────────────▶│
+        │                                │
+        │  3. Write WiFi config (JSON)   │
+        │──────────────────────────────▶ │
+        │   { ssid, password,            │
+        │     heartbeat_url,             │
+        │     heartbeat_token }          │
+        │                                │
+        │  4. Status notifications       │
+        │◀────────────────────────────── │
+        │   "wifi_connected"             │
+        │   "cloud_registered"           │
+        │   "streaming"                  │
+        │                                │
 
-**Stack**: Next.js 16, React 19, TypeScript, Tailwind v4, pnpm
+ BLE Service UUID: 4fafc201-1fb5-459e-8fcc-c5c9c331914b
+ WiFi Config Char: beb5483e-36e1-4688-b7f5-ea07361b26a8
+ Status Char:      beb5483e-36e1-4688-b7f5-ea07361b26a9
+```
 
-### `/camera-viewer` — Sally Camera Live Viewer
+---
 
-Standalone HTML page for viewing live camera feeds with AI-powered analysis.
+## Hardware
 
-- **Live video**: WebSocket frame streaming with FPS/latency stats
-- **Image enhancement**: Brightness, contrast, saturation controls with presets
-- **AI Vision panel**: Object detection tags (browser-based + edge) with confidence scores
-- **Night vision**: IR LED toggle for low-light environments
+```
+ ┌──────────────────────────────────────────────┐
+ │         DFRobot DFR1154 ESP32-S3             │
+ │         16MB Flash · 8MB OPI PSRAM           │
+ │                                              │
+ │   GPIO 5  (XCLK)  ──────── OV3660 Camera    │
+ │   GPIO 8  (SDA)   ──────── OV3660 I2C       │
+ │   GPIO 9  (SCL)   ──────── OV3660 I2C       │
+ │   GPIO 1  (VSYNC) ──────── OV3660 Sync      │
+ │   GPIO 2  (HREF)  ──────── OV3660 Sync      │
+ │   GPIO 15 (PCLK)  ──────── OV3660 Clock     │
+ │   GPIO 4-21       ──────── OV3660 Data D0-D7│
+ │                                              │
+ │   GPIO 3          ──────── Recording LED     │
+ │   GPIO 47         ──────── IR LEDs (night)   │
+ │   GPIO 0          ──────── Button            │
+ │                                              │
+ │   GPIO 39         ──────── PDM Mic (data)    │
+ │   GPIO 38         ──────── PDM Mic (clock)   │
+ │   GPIO 45/46/42   ──────── I2S Speaker       │
+ └──────────────────────────────────────────────┘
 
-### `/codeplain` — Plain-Language AI Agents
+ Camera: OV3660 — VGA 640×480 @ 10 FPS, JPEG encoding
+ Night Vision: IR LED array, PWM controlled
+ Audio: PDM microphone + I2S DAC speaker output
+ Connectivity: WiFi 2.4GHz + BLE 5.0 (NimBLE)
+```
 
-Two AI agents for kitchen operations, built with [Codeplain](https://codeplain.org) — described entirely in plain English and compiled to working Python.
+---
 
-#### `menu_kiosk`
-A menu kiosk CLI with optional ElevenLabs voice narration. Browse menu items by category, look up individual dishes, and hear descriptions read aloud via text-to-speech. Supports JSON output mode.
+## Multi-Tenant Platform Architecture (Eve)
 
-#### `reorder_agent`
-A stock reorder decision agent for commercial kitchens. Reads a JSON stock report, identifies items with "low" or "critical" status, and outputs a reorder plan with urgency levels, reasoning, and suggested orders.
+```
+                          ┌──────────────────────────────────┐
+                          │         Incoming Request          │
+                          └──────────────┬───────────────────┘
+                                         │
+                                    proxy.ts
+                               tenant resolution
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    │                    │                    │
+                    ▼                    ▼                    ▼
+           ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+           │  heysalad.io │    │    app.      │    │  <slug>.     │
+           │  Marketing   │    │ heysalad.io  │    │ heysalad.io  │
+           │              │    │  Workspace   │    │   Tenant     │
+           │  Landing     │    │  Picker +    │    │  Dashboard   │
+           │  Features    │    │  Login       │    │  AI Chat     │
+           │  Pricing     │    │              │    │  Settings    │
+           │  FAQ         │    │              │    │  Domains     │
+           └──────────────┘    └──────────────┘    └──────────────┘
+
+ Auth:     HeySalad OAuth (Google, GitHub, Email OTP)
+ Billing:  Append-only credit_ledger + usage_events metering
+ Domains:  Vercel domain provisioning API + Cloudflare DNS
+ Stack:    Next.js 16, React 19, Tailwind v4, TypeScript
+```
+
+---
+
+## Codeplain Agents
+
+Two kitchen operations agents written in **plain English** and compiled to Python using [Codeplain](https://codeplain.org).
+
+```
+ ┌──────────────────────────────────────────────────────────────┐
+ │                    CODEPLAIN PIPELINE                        │
+ │                                                              │
+ │   .plain spec ──▶ codeplain compile ──▶ Python + tests       │
+ │                                                              │
+ │   menu_kiosk.plain ──▶ menu_kiosk.py                        │
+ │     • Browse menu by category (Starter/Main/Drink)          │
+ │     • Look up individual items with pricing                 │
+ │     • ElevenLabs TTS narration (--narrate flag)             │
+ │     • JSON output mode (--json flag)                        │
+ │                                                              │
+ │   reorder_agent.plain ──▶ reorder_agent.py                  │
+ │     • Reads JSON stock report                               │
+ │     • Flags "critical" items → urgency: high               │
+ │     • Flags "low" items → urgency: medium                  │
+ │     • Outputs reorder plan with reasoning                   │
+ └──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Services & URLs
+
+| Service | URL | Hosting |
+|---------|-----|---------|
+| Camera stream relay | sally-camera-stream.heysalad-o.workers.dev | Cloudflare Workers |
+| Vision detect API | sally-api.heysalad.app/api/vision/detect | Cloudflare Workers AI |
+| Heartbeat endpoint | heysalad-os.vercel.app/api/vision/ingest/heartbeat | Vercel |
+| Eve AI workspace | app.heysalad.io | Vercel |
+| Camera viewer | live.html (self-hosted) | Static HTML |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Mobile | React Native, Expo, TypeScript, BLE |
+| Platform | Next.js 16, React 19, Tailwind v4, TypeScript |
+| Camera Relay | Cloudflare Workers (WebSocket) |
+| AI Inference | Cloudflare Workers AI (DETR object detection) |
+| Firmware | PlatformIO, Arduino, ESP32-S3, C++ |
+| BLE | NimBLE (device), Web Bluetooth / react-native-ble-plx (app) |
+| Auth | HeySalad OAuth (Google, GitHub, Email OTP) |
+| Domains | Vercel for Platforms + Cloudflare DNS |
+| Agents | Codeplain (plain English → Python) |
+| TTS | ElevenLabs API (menu narration) |
 
 ---
 
@@ -90,35 +267,71 @@ A stock reorder decision agent for commercial kitchens. Reads a JSON stock repor
 cd mobile
 npm install
 npx expo start
+# Scan QR with Expo Go
 ```
 
-### Platform
+### Eve Platform
 ```bash
 cd platform
 pnpm install
 pnpm dev
+# http://localhost:3000
 ```
 
 ### Firmware
 ```bash
 cd firmware
 # Open in VS Code with PlatformIO extension
-# Build & upload to ESP32-S3
-pio run -t upload
+pio run -e dfrobot_dfr1154 -t upload
+pio device monitor -b 115200
+```
+
+### Camera Viewer
+```bash
+open camera-viewer/live.html
+# Enter device ID, connect via WebSocket
 ```
 
 ### Codeplain Agents
 ```bash
+# Menu kiosk
+cd codeplain/menu_kiosk
+python plain_modules/menu_kiosk/menu_kiosk.py --menu
+python plain_modules/menu_kiosk/menu_kiosk.py "Grain Bowl"
+python plain_modules/menu_kiosk/menu_kiosk.py "Grain Bowl" --json
+
+# Stock reorder
 cd codeplain/reorder_agent
-python dist/reorder_agent.py sample_stock_report.json
+python plain_modules/reorder_agent/reorder_agent.py sample_stock_report.json
 ```
+
+---
+
+## AQ Levels
+
+| Level | PM2.5 (µg/m³) | Color | Action |
+|-------|---------------|-------|--------|
+| Good | 0–12 | Green | None |
+| Moderate | 12.1–35.4 | Yellow | Ventilate |
+| Unhealthy | 35.5+ | Red | Alert operator |
+
+---
+
+## Built With
+
+This project was built during a hackathon weekend using AI-assisted development:
+
+- **Claude** (Anthropic) — architecture, firmware, platform code
+- **v0** (Vercel) — Eve platform scaffold
+- **Bilt** — mobile app scaffold
+- **Codeplain** — plain-language agent compilation
 
 ---
 
 ## Team
 
 **HeySalad OÜ** — Tallinn, Estonia
-Built with AI-assisted development using Claude, v0, Bilt, and Codeplain.
+Reg: 17327633
 
 ---
 
