@@ -330,8 +330,7 @@ This project was built during a hackathon weekend using AI-assisted development:
 
 ## Team
 
-**HeySalad OÜ** — Tallinn, Estonia
-Reg: 17327633
+**HeySalad Inc.** — Built in London
 
 ---
 
