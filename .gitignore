@@ -10,3 +10,15 @@ dist/
 .wrangler/
 __pycache__/
 *.pyc
+.env.*
+!.env.example
+*.key
+*.p12
+*.pem
+google-credentials.json
+*service-account*.json
+*credentials*.json
+*credentials*.json.backup
+.npmrc
+venv/
+.venv/
